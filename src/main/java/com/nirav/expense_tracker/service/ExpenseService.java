@@ -107,6 +107,11 @@ public class ExpenseService {
         return expenses.stream().mapToDouble(Expense::getAmount).sum();
     }
 
+    public Double getTotalExpenses(User user, LocalDate start, LocalDate end) {
+        return expenseRepository.findByUserAndDateBetween(user, start, end).stream()
+                .mapToDouble(Expense::getAmount).sum();
+    }
+
     public List<CategoryWiseExpense> getCategoryWiseExpenses(User user) {
         List<Object[]> results = expenseRepository.getCategoryWiseExpenses(user);
         return results.stream()

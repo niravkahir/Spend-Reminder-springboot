@@ -33,9 +33,9 @@ public class User {
     @JsonIgnore
     private List<Expense> expenses = new ArrayList<>();
 
-    @OneToOne(mappedBy = "user", cascade = CascadeType.ALL)
+    @OneToMany(mappedBy = "user", cascade = CascadeType.ALL)
     @JsonIgnore
-    private Budget budget;
+    private List<Budget> budgets = new ArrayList<>();
 
     public User() {}
 
@@ -55,7 +55,7 @@ public class User {
     public String getPassword() { return password; }
     public String getRole() { return role; }
     public List<Expense> getExpenses() { return expenses; }
-    public Budget getBudget() { return budget; }
+    public List<Budget> getBudgets() { return budgets; }
 
     // Setters
     public void setId(Long id) { this.id = id; }
@@ -65,5 +65,5 @@ public class User {
     public void setPassword(String password) { this.password = password; }
     public void setRole(String role) { this.role = role; }
     public void setExpenses(List<Expense> expenses) { this.expenses = expenses; }
-    public void setBudget(Budget budget) { this.budget = budget; }
+    public void setBudgets(List<Budget> budgets) { this.budgets = budgets; }
 }

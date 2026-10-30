@@ -8,6 +8,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.time.YearMonth;
+import java.time.ZoneId;
+import org.springframework.beans.factory.annotation.Value;
 
 @Service
 public class BudgetService {
@@ -18,12 +20,15 @@ public class BudgetService {
     @Autowired
     private ExpenseService expenseService;
 
+    @Value("${app.time-zone:Asia/Kolkata}")
+    private String timeZone;
+
     public Budget setBudget(Double monthlyLimit, User user) {
         if (monthlyLimit == null || monthlyLimit <= 0) {
             throw new IllegalArgumentException("Monthly limit must be greater than 0");
         }
 
-        String currentMonth = YearMonth.now().toString();
+        String currentMonth = YearMonth.now(ZoneId.of(timeZone)).toString();
 
         Budget budget = budgetRepository.findByUserAndMonth(user, currentMonth)
                 .orElse(new Budget());
@@ -36,7 +41,7 @@ public class BudgetService {
     }
 
     public Budget getUserBudget(User user) {
-        String currentMonth = YearMonth.now().toString();
+        String currentMonth = YearMonth.now(ZoneId.of(timeZone)).toString();
         return budgetRepository.findByUserAndMonth(user, currentMonth)
                 .orElse(null);
     }
@@ -47,7 +52,8 @@ public class BudgetService {
             return "No budget set for this month";
         }
 
-        Double totalExpenses = expenseService.getTotalExpenses(user);
+        YearMonth budgetMonth = YearMonth.parse(budget.getMonth());
+        Double totalExpenses = expenseService.getTotalExpenses(user, budgetMonth.atDay(1), budgetMonth.atEndOfMonth());
         double remaining = budget.getMonthlyLimit() - totalExpenses;
 
         if (remaining < 0) {

@@ -28,19 +28,14 @@ public class UserService {
             throw new DuplicateResourceException("User", "email", request.getEmail());
         }
 
-        String role = request.getRole();
-        if (role != null && !role.isEmpty()) {
-            if (!role.equals("USER") && !role.equals("ADMIN")) {
-                throw new RuntimeException("Invalid role! Role must be 'USER' or 'ADMIN'");
-            }
-        }
+        // Public registration must never grant privileged roles. Admin promotion is admin-only.
 
         User user = new User();
         user.setUsername(request.getUsername());
         user.setName(request.getName());
         user.setEmail(request.getEmail());
         user.setPassword(passwordEncoder.encode(request.getPassword()));
-        user.setRole(role != null && !role.isEmpty() ? role : "USER");
+        user.setRole("USER");
 
         return userRepository.save(user);
     }

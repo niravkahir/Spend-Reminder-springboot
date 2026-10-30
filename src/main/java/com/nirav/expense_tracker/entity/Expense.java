@@ -25,9 +25,8 @@ public class Expense {
     @JsonIgnore
     private User user;
 
-    @ManyToOne
+    @ManyToOne(fetch = FetchType.EAGER)
     @JoinColumn(name = "category_id", nullable = false)
-    @JsonIgnore
     private Category category;
 
     public Expense() {}

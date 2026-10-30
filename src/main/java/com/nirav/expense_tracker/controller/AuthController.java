@@ -62,7 +62,7 @@ public class AuthController {
 
         } catch (Exception e) {
             return ResponseEntity.status(401)
-                    .body(ApiResponse.error("Invalid username or password: " + e.getMessage()));
+                    .body(ApiResponse.error("Invalid username or password"));
         }
     }
 
