@@ -1,6 +1,8 @@
+
 package com.nirav.expense_tracker.ai;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nirav.expense_tracker.entity.Expense;
 import com.nirav.expense_tracker.entity.User;
 import com.nirav.expense_tracker.repository.ExpenseRepository;
@@ -9,7 +11,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 
@@ -20,121 +21,454 @@ import java.util.stream.Collectors;
 
 @Service
 public class AiInsightsService {
-    private static final Logger log = LoggerFactory.getLogger(AiInsightsService.class);
+
+    private static final Logger log =
+            LoggerFactory.getLogger(AiInsightsService.class);
+
+    private static final int HISTORY_MONTHS = 3;
+
     private final ExpenseRepository expenseRepository;
     private final RestTemplate restTemplate;
+    private final ObjectMapper objectMapper;
 
-    @Value("${app.time-zone:Asia/Kolkata}") private String timeZone;
-    @Value("${app.gemini.api-key:}") private String apiKey;
-    @Value("${app.gemini.model:gemini-2.5-flash}") private String model;
-    @Value("${app.gemini.base-url}") private String baseUrl;
+    @Value("${app.time-zone:Asia/Kolkata}")
+    private String timeZone;
 
-    public AiInsightsService(ExpenseRepository expenseRepository) {
+    @Value("${app.groq.api-key:}")
+    private String apiKey;
+
+    @Value("${app.groq.model:openai/gpt-oss-120b}")
+    private String model;
+
+    @Value("${app.groq.base-url:https://api.groq.com/openai/v1}")
+    private String baseUrl;
+
+    public AiInsightsService(
+            ExpenseRepository expenseRepository
+    ) {
         this.expenseRepository = expenseRepository;
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(3000);
-        factory.setReadTimeout(8000);
+        this.objectMapper = new ObjectMapper();
+
+        SimpleClientHttpRequestFactory factory =
+                new SimpleClientHttpRequestFactory();
+
+        factory.setConnectTimeout(5000);
+        factory.setReadTimeout(30000);
+
         this.restTemplate = new RestTemplate(factory);
     }
 
     public Map<String, Object> predictNextMonth(User user) {
-        YearMonth current = YearMonth.now(ZoneId.of(timeZone));
-        YearMonth firstMonth = current.minusMonths(6);
-        List<Expense> history = loadExpenses(user, firstMonth.atDay(1), current.minusMonths(1).atEndOfMonth());
-        Map<YearMonth, Double> monthlyTotals = new TreeMap<>();
-        Map<String, Map<YearMonth, Double>> categoryByMonth = new TreeMap<>();
-        for (int i = 0; i < 6; i++) monthlyTotals.put(firstMonth.plusMonths(i), 0.0);
-        for (Expense expense : history) {
-            YearMonth month = YearMonth.from(expense.getDate());
-            monthlyTotals.merge(month, expense.getAmount(), Double::sum);
-            String category = expense.getCategory().getName();
-            categoryByMonth.computeIfAbsent(category, key -> new TreeMap<>()).merge(month, expense.getAmount(), Double::sum);
+
+        YearMonth currentMonth =
+                YearMonth.now(ZoneId.of(timeZone));
+
+        YearMonth forecastMonth =
+                currentMonth.plusMonths(1);
+
+        YearMonth startMonth =
+                currentMonth.minusMonths(HISTORY_MONTHS);
+
+        YearMonth endMonth =
+                currentMonth.minusMonths(1);
+
+        List<Expense> expenses =
+                expenseRepository.findByUserAndDateBetween(
+                        user,
+                        startMonth.atDay(1),
+                        endMonth.atEndOfMonth()
+                );
+
+        List<Map<String, Object>> monthlyHistory =
+                buildMonthlyHistory(
+                        expenses,
+                        startMonth,
+                        endMonth
+                );
+
+        Map<String, Double> categoryTotals =
+                buildCategoryTotals(expenses);
+
+        Map<String, Object> result =
+                new LinkedHashMap<>();
+
+        result.put(
+                "forecastMonth",
+                forecastMonth.toString()
+        );
+
+        result.put(
+                "usingDemoData",
+                false
+        );
+
+        result.put(
+                "historyMonths",
+                monthlyHistory.size()
+        );
+
+        result.put(
+                "monthlyHistory",
+                monthlyHistory
+        );
+
+        if (expenses.isEmpty()) {
+
+            result.put("available", false);
+
+            result.put(
+                    "message",
+                    "No expenses found in the previous three completed months. "
+                            + "Add your expenses to generate an AI prediction."
+            );
+
+            return result;
         }
 
-        List<YearMonth> lastThree = List.of(current.minusMonths(3), current.minusMonths(2), current.minusMonths(1));
-        double predictedTotal = lastThree.stream().mapToDouble(m -> monthlyTotals.getOrDefault(m, 0.0)).average().orElse(0.0);
-        Map<String, Double> predictedCategories = new TreeMap<>();
-        for (Map.Entry<String, Map<YearMonth, Double>> entry : categoryByMonth.entrySet()) {
-            double average = lastThree.stream().mapToDouble(m -> entry.getValue().getOrDefault(m, 0.0)).average().orElse(0.0);
-            if (average > 0) predictedCategories.put(entry.getKey(), round(average));
+        if (apiKey == null || apiKey.isBlank()) {
+
+            result.put("available", false);
+
+            result.put(
+                    "message",
+                    "AI prediction is currently unavailable. "
+                            + "Please try again later."
+            );
+
+            return result;
         }
 
-        double latest = monthlyTotals.getOrDefault(current.minusMonths(1), 0.0);
-        double previous = monthlyTotals.getOrDefault(current.minusMonths(2), 0.0);
-        double change = previous == 0 ? 0 : ((latest - previous) / previous) * 100.0;
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("forecastMonth", current.toString());
-        result.put("predictedTotal", round(predictedTotal));
-        result.put("categoryPredictions", predictedCategories);
-        result.put("monthlyHistory", monthlyTotals.entrySet().stream().map(e -> Map.of("month", e.getKey().toString(), "total", round(e.getValue()))).collect(Collectors.toList()));
-        result.put("latestMonthChangePercent", round(change));
-        result.put("trend", change > 2 ? "INCREASING" : change < -2 ? "DECREASING" : "STABLE");
-        result.put("method", "Average of the last three completed calendar months; category forecasts use the same method.");
-        result.put("monthsWithData", monthlyTotals.values().stream().filter(v -> v > 0).count());
+        String prompt = buildPredictionPrompt(
+                forecastMonth,
+                monthlyHistory,
+                categoryTotals
+        );
+
+        JsonNode aiResponse = askGroq(prompt);
+
+        if (aiResponse == null) {
+
+            result.put("available", false);
+
+            result.put(
+                    "message",
+                    "AI could not generate a prediction right now. "
+                            + "Please try again later."
+            );
+
+            return result;
+        }
+
+        result.put("available", true);
+        result.put("prediction", aiResponse);
+
         return result;
     }
 
-    public Map<String, Object> adviseBudget(User user, double monthlyBudget) {
-        if (!Double.isFinite(monthlyBudget) || monthlyBudget <= 0) throw new IllegalArgumentException("Monthly budget must be greater than zero");
-        YearMonth current = YearMonth.now(ZoneId.of(timeZone));
-        List<Expense> history = loadExpenses(user, current.minusMonths(6).atDay(1), current.minusMonths(1).atEndOfMonth());
-        Map<String, Double> byCategory = history.stream().collect(Collectors.groupingBy(e -> e.getCategory().getName(), TreeMap::new, Collectors.summingDouble(Expense::getAmount)));
-        double historicalTotal = byCategory.values().stream().mapToDouble(Double::doubleValue).sum();
-        List<String> allCategories = byCategory.isEmpty() ? List.of("Food", "Travel", "Shopping", "Bills", "Entertainment", "Healthcare", "Education", "Other") : new ArrayList<>(byCategory.keySet());
-        double denominator = historicalTotal > 0 ? historicalTotal : allCategories.size();
-        double savingsTarget = round(monthlyBudget * 0.10);
-        Map<String, Double> limits = new LinkedHashMap<>();
-        for (String category : allCategories) {
-            double weight = historicalTotal > 0 ? byCategory.getOrDefault(category, 0.0) / denominator : 1.0 / denominator;
-            limits.put(category, round((monthlyBudget - savingsTarget) * weight));
-        }
-        List<String> reduce = byCategory.entrySet().stream().sorted(Map.Entry.<String, Double>comparingByValue().reversed()).limit(3).map(Map.Entry::getKey).collect(Collectors.toList());
-        List<String> suggestions = new ArrayList<>();
-        suggestions.add("Set aside about " + savingsTarget + " before discretionary spending (10% of the budget).");
-        if (!reduce.isEmpty()) suggestions.add("Review " + String.join(", ", reduce) + " first; these are your highest-spend categories in the available history.");
-        suggestions.add("Track spending weekly and adjust category limits rather than waiting until month-end.");
+    private List<Map<String, Object>> buildMonthlyHistory(
+            List<Expense> expenses,
+            YearMonth startMonth,
+            YearMonth endMonth
+    ) {
 
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("monthlyBudget", round(monthlyBudget));
-        result.put("suggestedSavings", savingsTarget);
-        result.put("spendableBudget", round(monthlyBudget - savingsTarget));
-        result.put("categoryLimits", limits);
-        result.put("categoriesToReview", reduce);
-        result.put("recommendations", suggestions);
-        result.put("historicalCategorySpend", byCategory);
-        result.put("aiEnhanced", false);
-        result.put("advisorNote", "The allocation is calculated from your previous six completed months. With no history, an equal category split is used.");
+        Map<YearMonth, Double> totals =
+                new TreeMap<>();
 
-        String aiText = askGemini("You are a cautious personal budgeting assistant. Based only on this user's summarized category spending and proposed budget, give 3 concise practical suggestions. Do not claim guaranteed savings or invent transaction facts. Budget: " + monthlyBudget + ". Historical category totals: " + byCategory + ". Suggested category limits: " + limits + ".");
-        if (aiText != null) {
-            result.put("aiEnhanced", true);
-            result.put("aiRecommendations", aiText);
+        for (Expense expense : expenses) {
+
+            YearMonth month =
+                    YearMonth.from(expense.getDate());
+
+            totals.merge(
+                    month,
+                    expense.getAmount(),
+                    Double::sum
+            );
         }
-        return result;
+
+        List<Map<String, Object>> history =
+                new ArrayList<>();
+
+        for (
+                YearMonth month = startMonth;
+                !month.isAfter(endMonth);
+                month = month.plusMonths(1)
+        ) {
+
+            Map<String, Object> monthData =
+                    new LinkedHashMap<>();
+
+            monthData.put(
+                    "month",
+                    month.toString()
+            );
+
+            monthData.put(
+                    "total",
+                    round(totals.getOrDefault(month, 0.0))
+            );
+
+            history.add(monthData);
+        }
+
+        return history;
     }
 
-    private List<Expense> loadExpenses(User user, java.time.LocalDate start, java.time.LocalDate end) {
-        return expenseRepository.findByUserAndDateBetween(user, start, end);
+    private Map<String, Double> buildCategoryTotals(
+            List<Expense> expenses
+    ) {
+
+        return expenses.stream()
+                .collect(
+                        Collectors.groupingBy(
+                                expense ->
+                                        expense.getCategory().getName(),
+                                TreeMap::new,
+                                Collectors.summingDouble(
+                                        Expense::getAmount
+                                )
+                        )
+                );
     }
 
-    private String askGemini(String prompt) {
-        if (apiKey == null || apiKey.isBlank()) return null;
+    private String buildPredictionPrompt(
+            YearMonth forecastMonth,
+            List<Map<String, Object>> monthlyHistory,
+            Map<String, Double> categoryTotals
+    ) {
+
+        return """
+                You are an intelligent personal expense
+                forecasting assistant.
+
+                Analyze the supplied REAL historical expense data
+                and predict the user's expenses for the
+                specified upcoming month.
+
+                FORECAST MONTH:
+                %s
+
+                MONTHLY EXPENSE HISTORY:
+                %s
+
+                CATEGORY-WISE EXPENSE TOTALS:
+                %s
+
+                INSTRUCTIONS:
+
+                1. Predict the total expenses for the forecast month.
+
+                2. Predict spending for each category.
+
+                3. Identify whether spending is increasing,
+                   decreasing, or stable.
+
+                4. Explain the prediction using observed patterns
+                   in the provided historical data.
+
+                5. Provide three short, practical recommendations.
+
+                6. Do not invent transactions or claim certainty.
+
+                7. The historical data contains exactly three
+                   completed calendar months.
+                   Do not assume any other historical data exists.
+
+                8. Category predictions should approximately
+                   add up to the predicted total.
+
+                9. Analyze trends across all three months.
+                   Do not simply repeat the latest month's
+                   expense total as the prediction.
+
+                10. If the historical data is insufficient or
+                    inconsistent, reflect that in the reasoning
+                    and confidence level.
+
+                11. Return ONLY valid JSON.
+                    Do not include Markdown or code fences.
+
+                REQUIRED JSON FORMAT:
+
+                {
+                  "predictedTotal": 10000,
+                  "trend": "STABLE",
+                  "trendPercentage": 2.5,
+                  "categoryPredictions": {
+                    "Food": 3000,
+                    "Travel": 1500,
+                    "Bills": 2500
+                  },
+                  "reasoning": "Explain the forecast briefly.",
+                  "recommendations": [
+                    "Recommendation one",
+                    "Recommendation two",
+                    "Recommendation three"
+                  ],
+                  "confidence": "LOW"
+                }
+
+                ALLOWED TREND VALUES:
+
+                INCREASING
+                DECREASING
+                STABLE
+
+                ALLOWED CONFIDENCE VALUES:
+
+                LOW
+                MEDIUM
+                HIGH
+
+                Important:
+                Confidence must reflect the amount and
+                consistency of the provided historical data.
+                """.formatted(
+                forecastMonth,
+                monthlyHistory,
+                categoryTotals
+        );
+    }
+
+    private JsonNode askGroq(String prompt) {
+
         try {
-            Map<String, Object> body = new HashMap<>();
-            body.put("contents", List.of(Map.of("parts", List.of(Map.of("text", prompt)))));
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.set("x-goog-api-key", apiKey);
-            HttpEntity<Map<String, Object>> request = new HttpEntity<>(body, headers);
-            String url = baseUrl + "/" + model + ":generateContent";
-            ResponseEntity<JsonNode> response = restTemplate.postForEntity(url, request, JsonNode.class);
-            JsonNode textNode = response.getBody() == null ? null : response.getBody().path("candidates").path(0).path("content").path("parts").path(0).path("text");
-            return textNode == null || textNode.isMissingNode() ? null : textNode.asText();
-        } catch (RestClientException ex) {
-            log.warn("Gemini advisor unavailable; returning deterministic budget advice: {}", ex.getMessage());
+
+            Map<String, Object> body =
+                    new LinkedHashMap<>();
+
+            body.put("model", model);
+
+            body.put("messages", List.of(
+                    Map.of(
+                            "role", "system",
+                            "content",
+                            "You are a personal expense forecasting assistant. "
+                                    + "Return only valid JSON without Markdown."
+                    ),
+                    Map.of(
+                            "role", "user",
+                            "content", prompt
+                    )
+            ));
+
+            body.put("temperature", 0.2);
+            body.put("max_tokens", 2048);
+
+            body.put(
+                    "response_format",
+                    Map.of("type", "json_object")
+            );
+
+            HttpHeaders headers =
+                    new HttpHeaders();
+
+            headers.setContentType(
+                    MediaType.APPLICATION_JSON
+            );
+
+            headers.setBearerAuth(apiKey);
+
+            HttpEntity<Map<String, Object>> request =
+                    new HttpEntity<>(body, headers);
+
+            String url =
+                    baseUrl + "/chat/completions";
+
+            log.info(
+                    "Sending AI prediction request. Model: {}",
+                    model
+            );
+
+            ResponseEntity<JsonNode> response =
+                    restTemplate.postForEntity(
+                            url,
+                            request,
+                            JsonNode.class
+                    );
+
+            JsonNode responseBody =
+                    response.getBody();
+
+            if (responseBody == null) {
+
+                log.error("AI provider returned an empty response body.");
+
+                return null;
+            }
+
+            JsonNode textNode =
+                    responseBody
+                            .path("choices")
+                            .path(0)
+                            .path("message")
+                            .path("content");
+
+            if (textNode.isMissingNode()
+                    || textNode.isNull()
+                    || textNode.asText().isBlank()) {
+
+                log.error(
+                        "AI provider returned empty content: {}",
+                        responseBody
+                );
+
+                return null;
+            }
+
+            String generatedText =
+                    textNode.asText().trim();
+
+            if (generatedText.startsWith("```")) {
+
+                generatedText = generatedText
+                        .replaceAll("^```(?:json)?\\s*", "")
+                        .replaceAll("\\s*```$", "")
+                        .trim();
+            }
+
+            return objectMapper.readTree(generatedText);
+
+        } catch (org.springframework.web.client.HttpStatusCodeException exception) {
+
+            log.error("========== AI API ERROR ==========");
+            log.error(
+                    "HTTP Status: {}",
+                    exception.getStatusCode()
+            );
+            log.error(
+                    "Response Body: {}",
+                    exception.getResponseBodyAsString()
+            );
+            log.error("=================================");
+
+            return null;
+
+        } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
+
+            log.error(
+                    "AI returned invalid JSON: {}",
+                    exception.getOriginalMessage()
+            );
+
+            return null;
+
+        } catch (Exception exception) {
+
+            log.error(
+                    "Unexpected AI integration error: {}",
+                    exception.getMessage(),
+                    exception
+            );
+
             return null;
         }
     }
 
-    private double round(double value) { return Math.round(value * 100.0) / 100.0; }
+    private double round(double value) {
+
+        return Math.round(
+                value * 100.0
+        ) / 100.0;
+    }
 }

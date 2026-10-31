@@ -1,19 +1,25 @@
+# Spring Boot / Maven
 HELP.md
 target/
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
 
-# Local secrets and environment files
+# Environment variables and secrets
 .env
 .env.*
-!.env
+!.env.example
 
-# Frontend dependencies and builds
+# Application configuration containing secrets
+appsettings.json
+appsettings.*.json
+!appsettings.example.json
+
+# Frontend (React / Vite)
 frontend/node_modules/
 frontend/dist/
 frontend/.env.local
-frontend/.env.production.local
+frontend/.env.*.local
 
 # IDEs
 .idea/
@@ -24,4 +30,11 @@ frontend/.env.production.local
 .project
 .settings/
 .vscode/
+
+# Operating system files
 .DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
